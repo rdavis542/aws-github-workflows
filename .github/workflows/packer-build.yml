@@ -1,0 +1,58 @@
+name: Packer Build
+
+on:
+  workflow_call:
+    inputs:
+      packer_file:
+        description: 'Packer template filename (e.g. ec2-base.pkr.hcl)'
+        type: string
+        required: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PACKER_LOG: 1
+
+jobs:
+  build-ami:
+    name: Packer Build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PACKER_ROLE_ARN }}
+          aws-region: ${{ github.event.inputs.region }}
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: latest
+
+      - name: Packer Init
+        working-directory: packer
+        run: packer init ${{ inputs.packer_file }}
+
+      - name: Packer Validate
+        working-directory: packer
+        run: |
+          packer validate \
+            -var "region=${{ github.event.inputs.region }}" \
+            -var "vpc_name=${{ github.event.inputs.vpc_name }}" \
+            -var "build_subnet_name=${{ github.event.inputs.build_subnet_name }}" \
+            ${{ inputs.packer_file }}
+
+      - name: Packer Build
+        working-directory: packer
+        run: |
+          packer build \
+            -var "region=${{ github.event.inputs.region }}" \
+            -var "vpc_name=${{ github.event.inputs.vpc_name }}" \
+            -var "build_subnet_name=${{ github.event.inputs.build_subnet_name }}" \
+            ${{ inputs.packer_file }}

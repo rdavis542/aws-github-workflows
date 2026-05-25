@@ -1,0 +1,116 @@
+name: Terraform Destroy
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        description: 'AWS region'
+        type: string
+        default: 'us-east-2'
+      tf_version:
+        description: 'Terraform version'
+        type: string
+        default: 'latest'
+      tf_vars:
+        description: 'JSON object of Terraform variables to set as TF_VAR_* env vars'
+        type: string
+        default: '{}'
+      var_file:
+        description: 'Path to .tfvars file relative to terraform/ directory (leave empty if using tf_vars)'
+        type: string
+        default: ''
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  tf-destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate destroy confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]; then
+            echo "::error::Destroy confirmation failed. You must type 'destroy' to proceed."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.tf_version }}
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.terraform.d/plugin-cache
+            terraform/.terraform
+          key: ${{ runner.os }}-terraform-${{ hashFiles('**/.terraform.lock.hcl') }}
+          restore-keys: |
+            ${{ runner.os }}-terraform-
+
+      - name: Set Terraform variables
+        if: inputs.tf_vars != '{}'
+        run: |
+          echo '${{ inputs.tf_vars }}' | jq -r 'to_entries[] | "TF_VAR_\(.key)=\(.value)"' >> $GITHUB_ENV
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan Destroy
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+        run: |
+          DESTROY_ARGS="-destroy -no-color"
+          if [ -n "${{ inputs.var_file }}" ]; then
+            DESTROY_ARGS="--var-file=${{ inputs.var_file }} $DESTROY_ARGS"
+          fi
+          if [ -n "${{ github.event.inputs.target_resource }}" ]; then
+            DESTROY_ARGS="-target='${{ github.event.inputs.target_resource }}' $DESTROY_ARGS"
+          fi
+          terraform plan $DESTROY_ARGS
+
+      - name: Terraform Destroy
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+        run: |
+          DESTROY_ARGS="-auto-approve"
+          if [ -n "${{ inputs.var_file }}" ]; then
+            DESTROY_ARGS="--var-file=${{ inputs.var_file }} $DESTROY_ARGS"
+          fi
+          if [ -n "${{ github.event.inputs.target_resource }}" ]; then
+            DESTROY_ARGS="-target='${{ github.event.inputs.target_resource }}' $DESTROY_ARGS"
+          fi
+          terraform destroy $DESTROY_ARGS
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "### Terraform Destroy Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** ${{ inputs.aws_region }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ github.event.inputs.target_resource }}" ]; then
+            echo "**Target:** ${{ github.event.inputs.target_resource }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Target:** All resources" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "**Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
